@@ -25,6 +25,13 @@ class InputDefaultsTests(unittest.TestCase):
     def test_launcher_default_matches_the_game(self):
         self.assertEqual(config.DEFAULT_INPUT_INI, game_default_text())
 
+    def test_menu_key_is_reserved(self):
+        self.assertEqual(config.menu_key(config.DEFAULT_INPUT_INI.splitlines()), 'f10')
+        self.assertEqual(config.menu_key(['hotkey_settings_menu = f6']), 'f6')
+        self.assertEqual(config.menu_key(['hotkey_settings_menu = insert']), 'f10')
+        self.assertIn('f10', config.reserved_keys('f7', 'f8'))
+        self.assertIn('f6', config.reserved_keys('f7', 'f8', 'f6'))
+
     def test_saving_before_the_game_made_the_file_keeps_the_controller(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'input.ini'

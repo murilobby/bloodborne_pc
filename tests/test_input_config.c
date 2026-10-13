@@ -12,6 +12,17 @@
 #include <unistd.h>
 #include <SDL3/SDL.h>
 
+#ifdef _WIN32
+/* MinGW has no setenv/unsetenv: the CRT's _putenv_s, where an empty value removes the variable. */
+static int setenv(const char *name, const char *value, int overwrite) {
+    (void)overwrite;
+    return _putenv_s(name, value);
+}
+static int unsetenv(const char *name) { return _putenv_s(name, ""); }
+/* A failed assert prints to stderr instead of opening a message box. */
+__attribute__((constructor)) static void assert_to_stderr(void) { _set_error_mode(_OUT_TO_STDERR); }
+#endif
+
 static int BindingCountFor(const InputConfig *cfg, InputOutput out) {
     return cfg->table.binding_count[out];
 }
@@ -79,6 +90,24 @@ static void TestDefaultHotkeyKeyReserved(void) {
     input_config_parse(&cfg, "cross = f7\n");
     assert(cfg.warnings == 1);
     assert(BindingCountFor(&cfg, OUT_CROSS) == 0);
+}
+
+/* The menu hotkey: F10 by default (also for files without the line), reserved for game
+ * outputs, movable, and never Insert or F9 (Insert opens the menu anyway). */
+static void TestMenuHotkey(void) {
+    InputConfig cfg;
+    input_config_parse(&cfg, "cross = space\n");
+    assert(cfg.menu_scancode == SDL_SCANCODE_F10);
+    input_config_parse(&cfg, "cross = f10\n");
+    assert(cfg.warnings == 1);
+    assert(BindingCountFor(&cfg, OUT_CROSS) == 0);
+    input_config_parse(&cfg, "hotkey_settings_menu = f6\ncross = f10\n");
+    assert(cfg.warnings == 0);
+    assert(cfg.menu_scancode == SDL_SCANCODE_F6);
+    assert(HasKeyBinding(&cfg, OUT_CROSS, SDL_SCANCODE_F10));
+    input_config_parse(&cfg, "hotkey_settings_menu = insert\n");
+    assert(cfg.warnings == 1);
+    assert(cfg.menu_scancode == SDL_SCANCODE_F10);
 }
 
 /* CFG-003: whitespace is stripped, '#' starts a comment, case does not matter. */
@@ -293,6 +322,7 @@ static void TestDefaultTextParsesCleanly(void) {
     assert(cfg.mouse.stick == 0); /* mouse_to_joystick left commented out */
     assert(cfg.toggle_scancode == SDL_SCANCODE_F7);
     assert(cfg.reload_scancode == SDL_SCANCODE_F8);
+    assert(cfg.menu_scancode == SDL_SCANCODE_F10);
 }
 
 /* AC-008: a real shadPS4 default input config loads without error; only
@@ -313,7 +343,7 @@ static void TestShadps4DefaultFileImports(void) {
 
 /* CFG-002: a missing file is created with the default text and still loads correctly. */
 static void TestLoadCreatesMissingFile(void) {
-    char path[] = "/tmp/bbport-input-test-XXXXXX";
+    char path[] = "out/bbport-input-test-XXXXXX"; /* out/ exists on Linux and Windows alike */
     int fd = mkstemp(path);
     assert(fd >= 0);
     close(fd);
@@ -332,7 +362,7 @@ static void TestLoadCreatesMissingFile(void) {
  * file: mouse lines only. Loading it adds the default controller and keyboard lines, to the
  * file as well; a file with both kinds is left as it is. */
 static void TestLoadRestoresMissingControllerAndKeyboard(void) {
-    char path[] = "/tmp/bbport-input-test-XXXXXX";
+    char path[] = "out/bbport-input-test-XXXXXX";
     int fd = mkstemp(path);
     assert(fd >= 0);
     static const char mouse_only[] = "mouse_to_joystick = right\nmouse_movement_params = 0.5, 1, 0.125";
@@ -386,6 +416,7 @@ int main(void) {
     TestReservedF9CannotBecomeHotkey();
     TestHotkeyRemapFreesDefaultKey();
     TestDefaultHotkeyKeyReserved();
+    TestMenuHotkey();
     TestWhitespaceCommentsAndCase();
     TestColonSuffixDiscarded();
     TestComboInputWarns();

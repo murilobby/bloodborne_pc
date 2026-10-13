@@ -196,11 +196,12 @@ static int IsUnconditionallyReserved(int32_t scancode) {
     return scancode == SDL_SCANCODE_INSERT || scancode == SDL_SCANCODE_F9;
 }
 /* Reserved for game-output bindings specifically: the above, plus whichever key currently
- * toggles the mouse or reloads input.ini (HOT-002). */
+ * toggles the mouse, reloads input.ini or opens the menu (HOT-002). */
 static int IsReservedScancode(int32_t scancode, const InputConfig *cfg) {
     if (IsUnconditionallyReserved(scancode)) return 1;
     if (cfg->toggle_scancode != SDL_SCANCODE_UNKNOWN && scancode == cfg->toggle_scancode) return 1;
     if (cfg->reload_scancode != SDL_SCANCODE_UNKNOWN && scancode == cfg->reload_scancode) return 1;
+    if (cfg->menu_scancode != SDL_SCANCODE_UNKNOWN && scancode == cfg->menu_scancode) return 1;
     return 0;
 }
 
@@ -412,7 +413,8 @@ static void ParseLine(ParseState *state, char *line) {
      * output, by the CFG-005 check below -- so this must run before that check consumes the
      * line in the hotkeys pass. */
     if (EqualsCaseInsensitive(output_raw, "hotkey_toggle_mouse_to_joystick") ||
-        EqualsCaseInsensitive(output_raw, "hotkey_reload_inputs")) {
+        EqualsCaseInsensitive(output_raw, "hotkey_reload_inputs") ||
+        EqualsCaseInsensitive(output_raw, "hotkey_settings_menu")) {
         if (!state->hotkeys_pass) return;
         if (strchr(input_raw, ',')) { ++cfg->warnings; return; }
         int32_t key;
@@ -421,7 +423,8 @@ static void ParseLine(ParseState *state, char *line) {
         if (sc == SDL_SCANCODE_UNKNOWN) { ++cfg->warnings; return; }
         if (IsUnconditionallyReserved((int32_t)sc)) { ++cfg->warnings; return; }
         if (EqualsCaseInsensitive(output_raw, "hotkey_toggle_mouse_to_joystick")) cfg->toggle_scancode = (int32_t)sc;
-        else cfg->reload_scancode = (int32_t)sc;
+        else if (EqualsCaseInsensitive(output_raw, "hotkey_reload_inputs")) cfg->reload_scancode = (int32_t)sc;
+        else cfg->menu_scancode = (int32_t)sc;
         return;
     }
     if (state->hotkeys_pass) return; /* everything else is handled only in the main pass */
@@ -486,6 +489,9 @@ void input_config_parse(InputConfig *out, const char *text) {
     out->stick_turn_rate = 0;
     out->toggle_scancode = SDL_SCANCODE_F7;
     out->reload_scancode = SDL_SCANCODE_F8;
+    /* Keyboards without Insert (laptops, compact layouts) still reach the menu, as do files
+     * written before this line existed. */
+    out->menu_scancode = SDL_SCANCODE_F10;
 
     ParseState state = {out, 1};
     ParseTextPass(&state, text); /* pass 1: hotkeys + special lines, so reservation is known */
@@ -505,7 +511,8 @@ void input_config_defaults(InputConfig *out) {
 #define DEFAULT_HEADER \
 "# bbport input (shadPS4 syntax: output = input, one input per line).\n" \
 "# A shadPS4 input config (user/input_config/CUSA03173.ini) can be copied over this file.\n" \
-"# F7 toggles the mouse, F8 reloads this file.\n" \
+"# F7 toggles the mouse, F8 reloads this file. Insert or F10 opens the port's menu, as do\n" \
+"# the keys bound to l3 and r3 pressed together (L3+R3 on a controller).\n" \
 "\n"
 
 #define DEFAULT_KEYBOARD \
@@ -583,7 +590,8 @@ void input_config_defaults(InputConfig *out) {
 #define DEFAULT_HOTKEYS \
 "# Hotkeys\n" \
 "hotkey_toggle_mouse_to_joystick = f7\n" \
-"hotkey_reload_inputs = f8\n"
+"hotkey_reload_inputs = f8\n" \
+"hotkey_settings_menu = f10\n"
 
 const char *input_config_default_text(void) {
     return DEFAULT_HEADER DEFAULT_KEYBOARD DEFAULT_HALFMODE DEFAULT_MOUSE DEFAULT_MOUSE_BUTTONS

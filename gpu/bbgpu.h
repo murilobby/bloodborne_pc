@@ -57,6 +57,11 @@ void bbgpu_input_configure(int mouse_mode_available, int32_t toggle_scancode, in
  * thread polls this once per sample() (CFG-008) to know when to re-read input.ini. 0 if no
  * window exists yet. */
 int bbgpu_input_reload_requested(void);
+/* The keyboard's ways into the settings menu besides Insert: the hotkey_settings_menu key
+ * (SDL_SCANCODE_UNKNOWN = none) and the keys bound to l3 and to r3, which open it pressed
+ * together like L3+R3 on a controller. Safe from any thread. */
+void bbgpu_menu_keys_configure(int32_t menu_scancode, const int32_t *l3_keys, int l3_count,
+                               const int32_t *r3_keys, int r3_count);
 /* Direct mouse camera (mouse_camera = direct in input.ini): whether it is wanted and its
  * sensitivity multiplier. Safe from any thread; applied on the window thread's next PollEvents. */
 void bbgpu_mouse_camera_configure(int direct, float sensitivity);

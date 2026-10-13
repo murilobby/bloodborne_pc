@@ -65,8 +65,9 @@ MOUSE_BUTTON_NAMES_SET = set(MOUSE_BUTTON_NAMES)
 BINDABLE_NAMES_SET = KEY_NAMES_SET | MOUSE_BUTTON_NAMES_SET
 
 # Reserved regardless of the file (HOT-001/HOT-002): the menu (Insert), BB_PAD_RECORD, and
-# whichever key currently toggles the mouse or reloads input.ini. The last two are read from the
-# file itself (hotkey_toggle_mouse_to_joystick / hotkey_reload_inputs) by reserved_keys() below.
+# whichever key currently toggles the mouse, reloads input.ini or opens the menu. Those three are
+# read from the file itself (hotkey_toggle_mouse_to_joystick / hotkey_reload_inputs by
+# load_input_ini, hotkey_settings_menu by menu_key) and passed to reserved_keys() below.
 # Escape is bindable: the overlay only uses it to close an open menu (src/runtime_input_config.c).
 ALWAYS_RESERVED = {'insert', 'f9'}
 
@@ -143,7 +144,8 @@ def input_ini_path(bbport_ini_path):
 DEFAULT_INPUT_INI = '''\
 # bbport input (shadPS4 syntax: output = input, one input per line).
 # A shadPS4 input config (user/input_config/CUSA03173.ini) can be copied over this file.
-# F7 toggles the mouse, F8 reloads this file.
+# F7 toggles the mouse, F8 reloads this file. Insert or F10 opens the port's menu, as do
+# the keys bound to l3 and r3 pressed together (L3+R3 on a controller).
 
 # Keyboard
 cross = space
@@ -210,6 +212,7 @@ axis_right_y = axis_right_y
 # Hotkeys
 hotkey_toggle_mouse_to_joystick = f7
 hotkey_reload_inputs = f8
+hotkey_settings_menu = f10
 '''
 
 # shadPS4/bbport defaults when mouse_movement_params is absent (spec section 4.2 / 4.3).
@@ -293,8 +296,21 @@ def load_input_ini(path):
     return bindings, lines, toggle_key, reload_key, mouse
 
 
-def reserved_keys(toggle_key, reload_key):
-    return ALWAYS_RESERVED | {toggle_key, reload_key}
+def menu_key(lines):
+    """The key hotkey_settings_menu sets in `lines`: F10 unless the file moves it (never to an
+    ALWAYS_RESERVED key, which the game refuses; src/runtime_input_config.c)."""
+    key = 'f10'
+    for raw in lines:
+        body = ''.join(raw.split()).split('#', 1)[0]
+        if '=' in body:
+            output, value = (p.split(':')[0] for p in body.split('=', 1))
+            if output == 'hotkey_settings_menu' and value in KEY_NAMES_SET and value not in ALWAYS_RESERVED:
+                key = value
+    return key
+
+
+def reserved_keys(toggle_key, reload_key, menu='f10'):
+    return ALWAYS_RESERVED | {toggle_key, reload_key, menu}
 
 
 def save_input_ini(path, bindings, lines):

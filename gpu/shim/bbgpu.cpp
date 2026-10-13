@@ -384,6 +384,11 @@ extern "C" int bbgpu_input_reload_requested(void) {
     return g_window->TakeInputReloadRequested();
 }
 
+extern "C" void bbgpu_menu_keys_configure(int32_t menu_scancode, const int32_t* l3_keys, int l3_count,
+                                          const int32_t* r3_keys, int r3_count) {
+    BbOverlay::ConfigureMenuKeys(menu_scancode, l3_keys, l3_count, r3_keys, r3_count);
+}
+
 extern "C" void bbgpu_mouse_camera_configure(int direct, float sensitivity) {
     Core::BloodborneCam::Instance().Configure(direct != 0, sensitivity);
 }

@@ -30,6 +30,11 @@ are then clamped and passed through the deadzone), matching shadPS4.
 | `leftjoystick_halfmode` `rightjoystick_halfmode` | Holding this input halves that stick's deflection (walk) |
 | `hotkey_toggle_mouse_to_joystick` | Key that toggles mouse look on/off (default `f7`) |
 | `hotkey_reload_inputs` | Key that reloads this file without restarting (default `f8`) |
+| `hotkey_settings_menu` | Key that opens the port's settings menu besides Insert (default `f10`) |
+
+The settings menu also opens with the keys bound to `l3` and `r3` pressed together (Z+Q or Z+C
+by default), as L3+R3 does on a controller: keyboards without Insert (laptops, compact layouts)
+reach it either way. That chord does nothing while a text box is open (the character name).
 
 `l2`/`r2` also carry an analog value: a trigger bound to them passes its own reading; a key or
 button snaps it to the maximum, same as the previous fixed layout.
@@ -148,15 +153,17 @@ analog_deadzone = leftjoystick, 1, 127   # device, inner, outer (1..127 each)
 and are rejected with a warning if a line tries. **Escape** can be bound (e.g. `options = escape`):
 the settings menu only uses it to close itself, and the game gets no input while that menu or the
 text entry box is open. Whatever key currently toggles
-mouse look or reloads the file (`f7`/`f8` by default, or whatever `hotkey_toggle_mouse_to_joystick`/
-`hotkey_reload_inputs` were last set to) is reserved the same way.
+mouse look, reloads the file or opens the menu (`f7`/`f8`/`f10` by default, or whatever
+`hotkey_toggle_mouse_to_joystick`/`hotkey_reload_inputs`/`hotkey_settings_menu` were last set to)
+is reserved the same way.
 
 ## Default file
 
 ```ini
 # bbport input (shadPS4 syntax: output = input, one input per line).
 # A shadPS4 input config (user/input_config/CUSA03173.ini) can be copied over this file.
-# F7 toggles the mouse, F8 reloads this file.
+# F7 toggles the mouse, F8 reloads this file. Insert or F10 opens the port's menu, as do
+# the keys bound to l3 and r3 pressed together (L3+R3 on a controller).
 
 # Keyboard
 cross = space
@@ -223,6 +230,7 @@ axis_right_y = axis_right_y
 # Hotkeys
 hotkey_toggle_mouse_to_joystick = f7
 hotkey_reload_inputs = f8
+hotkey_settings_menu = f10
 ```
 
 Without an `input.ini`, this default reproduces the previous fixed layout, except: the keyboard

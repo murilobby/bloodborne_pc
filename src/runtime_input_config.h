@@ -81,6 +81,7 @@ typedef struct InputConfig {
     int stick_turn_rate;        /* stick_turn_rate = 0..5000 degrees/s (0 = instant, default) */
     int32_t toggle_scancode; /* hotkey_toggle_mouse_to_joystick; SDL_SCANCODE_UNKNOWN = none bound */
     int32_t reload_scancode; /* hotkey_reload_inputs */
+    int32_t menu_scancode;   /* hotkey_settings_menu: opens the port's menu besides Insert (F10) */
     unsigned warnings;       /* lines ignored during parse, for the startup log line */
 } InputConfig;
 

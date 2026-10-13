@@ -3,6 +3,17 @@
 #include <unistd.h>
 #include "../src/runtime_pad.c"
 
+#ifdef _WIN32
+/* MinGW has no setenv/unsetenv: the CRT's _putenv_s, where an empty value removes the variable. */
+static int setenv(const char *name, const char *value, int overwrite) {
+    (void)overwrite;
+    return _putenv_s(name, value);
+}
+static int unsetenv(const char *name) { return _putenv_s(name, ""); }
+/* A failed assert prints to stderr instead of opening a message box. */
+__attribute__((constructor)) static void assert_to_stderr(void) { _set_error_mode(_OUT_TO_STDERR); }
+#endif
+
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
@@ -25,6 +36,10 @@ void bbgpu_input_configure(int mouse_mode_available, int32_t toggle_scancode, in
 }
 void bbgpu_mouse_camera_configure(int direct, float sensitivity) {
     (void)direct; (void)sensitivity;
+}
+void bbgpu_menu_keys_configure(int32_t menu_scancode, const int32_t *l3_keys, int l3_count,
+                               const int32_t *r3_keys, int r3_count) {
+    (void)menu_scancode; (void)l3_keys; (void)l3_count; (void)r3_keys; (void)r3_count;
 }
 /* T6: controlled by the tests via stub_reload_requested, draining to 0 on read like the real
  * one (bbgpu_input_reload_requested's own doc comment: "1 once ... then clears back to 0"). */
@@ -309,7 +324,7 @@ static void test_mouse_buttons_and_wheel(void) {
 /* T5 end to end: a captured mouse moving the right stick through sample_host/pad_read_state,
  * and MOU-006 (mouse bindings are inert while bbgpu_mouse_take reports captured=0). */
 static void test_mouse_end_to_end(void) {
-    char config_path[]="/tmp/bbport-pad-test-mouse-XXXXXX";
+    char config_path[]="out/bbport-pad-test-mouse-XXXXXX";
     int fd=mkstemp(config_path);
     assert(fd>=0);
     FILE *f=fdopen(fd,"w");
@@ -346,7 +361,7 @@ static void test_mouse_end_to_end(void) {
  * still a real regression guard: a bug in ensure_config_loaded/active_config that crashed, hung,
  * or left stale bindings from the earlier test would show up here. */
 static void test_custom_binding_config(void) {
-    char config_path[]="/tmp/bbport-pad-test-config-XXXXXX";
+    char config_path[]="out/bbport-pad-test-config-XXXXXX";
     int fd=mkstemp(config_path);
     assert(fd>=0);
     FILE *f=fdopen(fd,"w");
@@ -375,7 +390,7 @@ static void test_custom_binding_config(void) {
  * live binding without restarting the process -- the actual behavior "F8 reloads", not just
  * that the two pieces (input_config_load, reload_config_if_requested) exist in isolation. */
 static void test_reload_on_f8(void) {
-    char config_path[]="/tmp/bbport-pad-test-reload-XXXXXX";
+    char config_path[]="out/bbport-pad-test-reload-XXXXXX";
     int fd=mkstemp(config_path);
     assert(fd>=0);
     FILE *f=fdopen(fd,"w");
@@ -421,7 +436,7 @@ int main(void) {
     test_mouse_to_axis();
     test_mouse_buttons_and_wheel();
 
-    char path[]="/tmp/bbport-pad-test-XXXXXX";
+    char path[]="out/bbport-pad-test-XXXXXX";
     int fd=mkstemp(path);
     assert(fd>=0);
     close(fd);

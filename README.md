@@ -39,7 +39,7 @@ https://nativeretro.com/
 - **Add to Steam** puts the game in your Steam library in one click.
 - **`Play Bloodborne.exe`** starts the game straight away with your saved settings (good for a
   desktop shortcut).
-- **Controller and keyboard**, an in-game settings menu (Insert or L3+R3), name entry on
+- **Controller and keyboard**, an in-game settings menu (Insert, F10 or L3+R3), name entry on
   screen, a desktop shortcut, and a button to clear the shader cache.
 - **Keyboard and mouse:** remap keys and buttons on the Controls page, mouse look, and an
   optional direct 1:1 mouse camera ([docs/INPUT.md](docs/INPUT.md)).
@@ -73,7 +73,8 @@ dump, also dump your add-ons: each is a folder named like `SPEXPANSIONDLC03` wit
 it as **DLC folder** on **Game & effects**, or copy them to `user\addcont\<title id>\` (the
 layout shadPS4 and bbport use).
 
-In the game, **Insert** (or **L3+R3** on a controller) opens the settings menu.
+In the game, **Insert** or **F10** (or **L3+R3**: on a controller, or **Z+Q** on the keyboard)
+opens the settings menu.
 Keyboard: WASD move, arrows camera, Space Cross, Left Shift Circle, E Square, V Triangle,
 1/3 L1/R1, R/F L2/R2, Z L3, Q/C R3 (lock-on), I/K/J/L d-pad, Enter Options, Tab touchpad.
 The keyboard now works together with a connected controller instead of only without one.

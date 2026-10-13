@@ -344,6 +344,16 @@ static void mouse_to_axis(float dx, float dy, double dt_ms, const MouseParams *m
 static InputConfig default_config;
 static InputConfig *loaded_config; /* NULL until pad_open's first load; falls back to defaults */
 static int config_initialized;
+/* The menu's keyboard keys besides Insert: the hotkey and the keys bound to l3 and r3. */
+static void configure_menu_keys(const InputConfig *cfg) {
+    int32_t l3[INPUT_MAX_BINDINGS_PER_OUTPUT], r3[INPUT_MAX_BINDINGS_PER_OUTPUT];
+    int l3_count=0, r3_count=0;
+    for (int i=0; i<cfg->table.binding_count[OUT_L3]; ++i)
+        if (cfg->table.bindings[OUT_L3][i].kind==IN_KEY) l3[l3_count++]=cfg->table.bindings[OUT_L3][i].value;
+    for (int i=0; i<cfg->table.binding_count[OUT_R3]; ++i)
+        if (cfg->table.bindings[OUT_R3][i].kind==IN_KEY) r3[r3_count++]=cfg->table.bindings[OUT_R3][i].value;
+    bbgpu_menu_keys_configure(cfg->menu_scancode,l3,l3_count,r3,r3_count);
+}
 static void ensure_config_loaded(void) {
     if (config_initialized) return;
     config_initialized=1;
@@ -363,6 +373,7 @@ static void ensure_config_loaded(void) {
                           loaded_config ? loaded_config->reload_scancode : default_config.reload_scancode);
     bbgpu_mouse_camera_configure(loaded_config ? loaded_config->mouse.camera_direct : 0,
                                  loaded_config ? loaded_config->mouse.camera_sensitivity : 1.0f);
+    configure_menu_keys(loaded_config ? loaded_config : &default_config);
 }
 /* CFG-008: called once per sample() (under `lock`), reloads if the window thread set the F8
  * flag. The read of the new file (input_config_load, I/O) happens before the critical section
@@ -382,6 +393,7 @@ static void reload_config_if_requested(void) {
         else printf("Input config: %s reloaded\n",path);
         bbgpu_input_configure(loaded_config->mouse.stick!=0,loaded_config->toggle_scancode,loaded_config->reload_scancode);
         bbgpu_mouse_camera_configure(loaded_config->mouse.camera_direct,loaded_config->mouse.camera_sensitivity);
+        configure_menu_keys(loaded_config);
     } else {
         free(fresh);
     }

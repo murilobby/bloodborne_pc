@@ -127,8 +127,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bbport_lang  # noqa: E402
 import bbport_trophies as trophies  # noqa: E402
 from bbport_input_config import (KEYBOARD_OUTPUTS, BUTTON_OUTPUTS, STICK_OUTPUTS, OUTPUT_LABELS, keysym_to_name,
-                                  button_num_to_name, input_ini_path, load_input_ini, reserved_keys,
-                                  save_input_ini, save_mouse_settings, wheel_to_name)  # noqa: E402
+                                  button_num_to_name, input_ini_path, load_input_ini, menu_key,
+                                  reserved_keys, save_input_ini, save_mouse_settings,
+                                  wheel_to_name)  # noqa: E402
 
 LANG = 'en'
 
@@ -1510,7 +1511,8 @@ class Launcher:
             self.refresh_remap_row(output)
 
         def apply(name):
-            reserved = reserved_keys(self.remap_toggle_key, self.remap_reload_key)
+            reserved = reserved_keys(self.remap_toggle_key, self.remap_reload_key,
+                                     menu_key(self.remap_lines))
             if name in reserved:
                 self.messagebox.showwarning(
                     _('Reserved', 'Зарезервировано'),

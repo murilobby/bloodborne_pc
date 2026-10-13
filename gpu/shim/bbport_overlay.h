@@ -23,6 +23,10 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count);
 
 /// Window thread, for every SDL event: true when the menu consumed it.
 bool HandleEvent(const SDL_Event& event);
+/// Any thread (input.ini loaded): the keyboard's ways into the menu besides Insert, the
+/// hotkey_settings_menu key (0 = none) and the keys bound to L3 and to R3 pressed together.
+void ConfigureMenuKeys(s32 menu_scancode, const s32* l3_keys, int l3_count, const s32* r3_keys,
+                       int r3_count);
 /// Turns SDL text input on while the menu edits a value (window thread, once per poll).
 void UpdateTextInput(SDL_Window* window);
 

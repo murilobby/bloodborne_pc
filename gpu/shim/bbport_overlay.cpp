@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <chrono>
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <vector>
 
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
@@ -51,6 +53,10 @@ std::mutex imgui_mutex; // the ImGui context: window thread (input) and present 
 bool initialized = false;
 std::atomic<bool> menu_open{false};
 bool l3_down = false, r3_down = false;
+// The keyboard's ways into the menu besides Insert (ConfigureMenuKeys), guarded by imgui_mutex:
+// the hotkey_settings_menu key, F10 until input.ini is read, and the keys bound to L3 and R3.
+s32 menu_scancode = SDL_SCANCODE_F10;
+std::vector<s32> chord_l3, chord_r3;
 bool dirty = false; // settings changed while open: saved on close
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
@@ -117,6 +123,24 @@ ImGuiKey KeyFromGamepad(u8 button) {
     }
 }
 
+// The key just pressed completes L3+R3 on the keyboard: one key bound to L3 and one bound to
+// R3 are both down (laptops and compact keyboards have no Insert key).
+bool KeyboardChord(s32 scancode) {
+    const auto has = [](const std::vector<s32>& keys, s32 key) {
+        return std::find(keys.begin(), keys.end(), key) != keys.end();
+    };
+    if (!has(chord_l3, scancode) && !has(chord_r3, scancode)) {
+        return false;
+    }
+    const bool* state = SDL_GetKeyboardState(nullptr);
+    const auto any_down = [state](const std::vector<s32>& keys) {
+        return std::any_of(keys.begin(), keys.end(), [state](s32 key) {
+            return key > SDL_SCANCODE_UNKNOWN && key < SDL_SCANCODE_COUNT && state[key];
+        });
+    };
+    return state && any_down(chord_l3) && any_down(chord_r3);
+}
+
 float PixelDensity(SDL_WindowID id) {
     SDL_Window* window = SDL_GetWindowFromID(id);
     const float density = window ? SDL_GetWindowPixelDensity(window) : 1.0f;
@@ -168,7 +192,7 @@ void Menu() {
         ImVec2(0.0f, 0.0f),
         ImVec2(FLT_MAX, std::max(viewport->WorkSize.y - 60.0f * base_scale, 200.0f * base_scale)));
     bool keep_open = true;
-    if (!ImGui::Begin("Bloodborne - Settings (Insert / L3+R3)", &keep_open,
+    if (!ImGui::Begin("Bloodborne - Settings (Insert / F10 / L3+R3)", &keep_open,
                       ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
@@ -499,7 +523,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         return;
     }
     initialized = true;
-    std::printf("Overlay: menu ready (Insert or L3+R3)\n");
+    std::printf("Overlay: menu ready (Insert, F10 or L3+R3)\n");
 }
 
 void UpdateTextInput(SDL_Window* window) {
@@ -517,6 +541,14 @@ void UpdateTextInput(SDL_Window* window) {
     }
 }
 
+void ConfigureMenuKeys(s32 scancode, const s32* l3_keys, int l3_count, const s32* r3_keys,
+                       int r3_count) {
+    std::scoped_lock lock{imgui_mutex};
+    menu_scancode = scancode;
+    chord_l3.assign(l3_keys, l3_keys + std::max(l3_count, 0));
+    chord_r3.assign(r3_keys, r3_keys + std::max(r3_count, 0));
+}
+
 bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
@@ -528,10 +560,19 @@ bool HandleEvent(const SDL_Event& event) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (down && !event.key.repeat &&
-            (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
-            SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
-            return true;
+        if (down && !event.key.repeat) {
+            const s32 scancode = static_cast<s32>(event.key.scancode);
+            const bool menu_key = event.key.key == SDLK_INSERT ||
+                                  (menu_scancode != SDL_SCANCODE_UNKNOWN && scancode == menu_scancode);
+            if (menu_key || (is_open && event.key.key == SDLK_ESCAPE)) {
+                SetOpen(menu_key ? !is_open : false);
+                return true;
+            }
+            // L3+R3 on the keyboard, except while typing (the game's name entry, a menu field).
+            if (!text_entry_active && !(is_open && io.WantTextInput) && KeyboardChord(scancode)) {
+                SetOpen(!is_open);
+                return true;
+            }
         }
         if (!is_open) {
             return false;
