@@ -113,6 +113,7 @@ struct PrepWorker {
 };
 
 struct PreparedDraw;
+class PipelineCompiler;
 
 class PipelineCache {
 public:
@@ -127,8 +128,10 @@ public:
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
     bool LoadPipelineStage(Serialization::Archive& ar, size_t stage);
 
+    /// `indirect`: the draw's arguments are in memory (bbport: never skipped while compiling).
     const GraphicsPipeline* GetGraphicsPipeline(const DrawIndirectParams params = {},
-                                                const PreparedDraw* prepared = nullptr);
+                                                const PreparedDraw* prepared = nullptr,
+                                                bool indirect = false);
 
     /// bbport: worker side of draw preparation: selects the pipeline key for `sel.regs` without
     /// creating anything. False when a program or permutation does not exist yet.
@@ -203,6 +206,23 @@ private:
     tsl::robin_map<vk::ShaderModule,
                    std::vector<std::variant<GraphicsPipelineKey, ComputePipelineKey>>>
         module_related_pipelines;
+
+    /// bbport BB_ASYNC_PIPELINES (from bbport 0.5): a new graphics pipeline of a pass drawn every
+    /// frame is compiled on worker threads (PipelineCompiler) while its draws go without it for a
+    /// frame or two, instead of the game waiting for the driver's compile.
+    /// The saved pipelines of the database (WarmUp) are created the same way, in the background
+    /// while the game starts, instead of the GPU thread creating them all before the first frame.
+    struct PendingPipeline;
+    static bool AsyncEnabled();
+    PipelineCompiler& Compiler();
+    /// WarmUp: the saved pipeline in `sel` (key, stages, fetch shader) queued for the compiler's
+    /// threads; false when it is there already.
+    bool QueueSavedPipeline(GraphicsPipeline::SerializationSupport&& sdata);
+    bool AsyncSkippable(const PipelineSelection& sel, bool indirect);
+    const GraphicsPipeline* FinishPipeline(const GraphicsPipelineKey& key, PendingPipeline& job);
+    tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<PendingPipeline>> pending_graphics;
+    u64 async_started = 0, async_skipped = 0, async_waited = 0; ///< statistics
+    std::unique_ptr<PipelineCompiler> compiler; ///< last: its threads are joined first
 };
 
 } // namespace Vulkan

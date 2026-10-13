@@ -88,6 +88,11 @@ inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command 
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
+/// The pipeline database's warm-up in the background (BB_ASYNC_PIPELINES): pipelines queued,
+/// built, whether all are queued, and when it started (steady clock, ms). The menu shows it.
+inline std::atomic<std::uint32_t> warmup_total{0}, warmup_done{0};
+inline std::atomic<bool> warmup_queued{false};
+inline std::atomic<std::int64_t> warmup_start_ms{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
     t_staging{0}, t_host_wait{0}, t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},

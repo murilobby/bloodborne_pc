@@ -1,18 +1,28 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <ranges>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <unordered_set>
+
+#include "bbport_toggles.h"
 
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
+#include "common/thread.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -277,6 +287,121 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
     return info;
 }
 
+/// bbport BB_ASYNC_PIPELINES: worker threads creating graphics pipelines (the driver's compile,
+/// vkCreateGraphicsPipelines, with its own VkPipelineCache synchronization). Urgent tasks (a
+/// pipeline a draw is waiting for) run before background ones (the pipeline database's
+/// warm-up); both in order. At low priority: the game's threads come first. Stopping drops
+/// what is still queued, so leaving the game does not wait for a warm-up to finish.
+class PipelineCompiler {
+public:
+    explicit PipelineCompiler(u32 threads) {
+        for (u32 i = 0; i < threads; ++i) {
+            workers.emplace_back([this] { Run(); });
+        }
+    }
+    ~PipelineCompiler() {
+        {
+            std::scoped_lock lk{mutex};
+            stop = true;
+        }
+        cv.notify_all();
+        for (auto& worker : workers) {
+            worker.join();
+        }
+    }
+    void Submit(std::function<void()> task, bool urgent) {
+        {
+            std::scoped_lock lk{mutex};
+            (urgent ? urgent_tasks : background_tasks).push_back(std::move(task));
+        }
+        cv.notify_one();
+    }
+
+private:
+    void Run() {
+        Common::SetCurrentThreadName("bb:PipeCompile");
+        Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::unique_lock lk{mutex};
+                cv.wait(lk, [&] {
+                    return stop || !urgent_tasks.empty() || !background_tasks.empty();
+                });
+                if (stop) {
+                    return;
+                }
+                auto& tasks = !urgent_tasks.empty() ? urgent_tasks : background_tasks;
+                task = std::move(tasks.front());
+                tasks.pop_front();
+            }
+            task();
+        }
+    }
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<std::function<void()>> urgent_tasks, background_tasks;
+    std::vector<std::thread> workers;
+    bool stop = false;
+};
+
+/// bbport BB_ASYNC_PIPELINES: a graphics pipeline created off the GPU thread. Whoever takes it
+/// first while it is queued builds it: a compiler worker, or the GPU thread when a draw cannot
+/// go without it (the queue may be long: the warm-up's).
+struct PipelineCache::PendingPipeline {
+    enum class State { Queued, Running, Done };
+    std::mutex mutex;
+    std::condition_variable cv;
+    State state = State::Queued;
+    bool preloaded = false; ///< from the pipeline database: saved there already
+    /// Creates the pipeline; `sdata` holds the saved data when preloading, else receives it.
+    std::function<std::unique_ptr<GraphicsPipeline>(GraphicsPipeline::SerializationSupport&)>
+        build;
+    bool promoted = false; ///< moved to the urgent queue already (a draw went without it)
+    std::unique_ptr<GraphicsPipeline> pipeline;
+    GraphicsPipeline::SerializationSupport sdata{};
+    std::array<vk::ShaderModule, MaxShaderStages> modules{};
+
+    /// Builds the pipeline unless another thread took it first (false then).
+    bool Run() {
+        {
+            std::scoped_lock lk{mutex};
+            if (state != State::Queued) {
+                return false;
+            }
+            state = State::Running;
+        }
+        GraphicsPipeline::SerializationSupport data = std::move(sdata);
+        std::unique_ptr<GraphicsPipeline> built;
+        try {
+            built = build(data);
+        } catch (...) {
+            built.reset(); // its draws are skipped, as for a pipeline the driver refused
+        }
+        {
+            std::scoped_lock lk{mutex};
+            pipeline = std::move(built);
+            sdata = std::move(data);
+            build = nullptr;
+            state = State::Done;
+        }
+        cv.notify_all();
+        if (preloaded) {
+            const u32 done = BbStats::warmup_done.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (done == BbStats::warmup_total.load(std::memory_order_relaxed) &&
+                BbStats::warmup_queued.load(std::memory_order_acquire)) {
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count() -
+                                BbStats::warmup_start_ms.load(std::memory_order_relaxed);
+                std::printf("GPU: %u saved pipelines compiled in the background in %.1f s\n", done,
+                            double(ms) / 1000.0);
+            }
+        }
+        return true;
+    }
+};
+
 PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              AmdGpu::Liverpool* liverpool_, u32 sparse_page_shift)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
@@ -345,12 +470,13 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
-    WarmUp();
-
+    // bbport: before the warm-up, whose pipelines are created on the compiler's threads.
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+
+    WarmUp();
 }
 
 PipelineCache::~PipelineCache() = default;
@@ -411,9 +537,51 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
     return it != graphics_pipelines.end() ? it->second.get() : nullptr;
 }
 
+namespace {
+/// bbport BB_ASYNC_PIPELINES: per render target (its address), how many frames in a row draws
+/// went to it. Only the GPU thread (pipeline selection) touches it.
+struct TargetStreak {
+    u64 last_frame = ~0ull;
+    u32 frames = 0;
+};
+std::unordered_map<u64, TargetStreak> target_streaks;
+
+/// The draw's render target: its first color buffer written, else its depth buffer, else 0.
+u64 DrawTarget(const AmdGpu::Regs& regs) {
+    if (regs.color_control.mode != AmdGpu::ColorControl::OperationMode::Disable) {
+        for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+            if (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) {
+                return regs.color_buffers[cb].Address();
+            }
+        }
+    }
+    return regs.depth_buffer.DepthValid() ? regs.depth_buffer.DepthAddress() : 0;
+}
+
+/// Counts the frames in a row a target is drawn to (once per frame and target).
+void NoteDrawTarget(const AmdGpu::Regs& regs) {
+    static u64 last_target = 0;
+    static u64 last_frame = ~0ull;
+    const u64 frame = BbStats::gpu_frames.load(std::memory_order_relaxed);
+    const u64 target = DrawTarget(regs);
+    if (target == 0 || (target == last_target && frame == last_frame)) {
+        return;
+    }
+    last_target = target;
+    last_frame = frame;
+    auto& streak = target_streaks[target];
+    if (streak.last_frame != frame) {
+        streak.frames = streak.last_frame + 1 == frame ? streak.frames + 1 : 1;
+        streak.last_frame = frame;
+    }
+}
+} // namespace
+
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
-                                                           const PreparedDraw* prepared) {
+                                                           const PreparedDraw* prepared,
+                                                           bool indirect) {
     used_prepared = nullptr;
+    NoteDrawTarget(liverpool->regs);
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
             used_prepared = prepared;
@@ -422,6 +590,63 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     }
     sel.draw_indirect_params = params;
     if (!RefreshGraphicsKey(sel)) {
+        return nullptr;
+    }
+    if (const auto found = graphics_pipelines.find(sel.graphics_key);
+        found != graphics_pipelines.end()) {
+        return found->second.get();
+    }
+    // bbport BB_ASYNC_PIPELINES: being compiled on a worker, or to be.
+    const bool skippable = AsyncSkippable(sel, indirect);
+    if (const auto pending = pending_graphics.find(sel.graphics_key);
+        pending != pending_graphics.end()) {
+        const std::shared_ptr<PendingPipeline> job = pending->second;
+        {
+            std::unique_lock lk{job->mutex};
+            if (job->state != PendingPipeline::State::Done) {
+                if (skippable) {
+                    // First in line from now on: a warm-up job may be far back in the queue.
+                    if (job->state == PendingPipeline::State::Queued && !job->promoted) {
+                        job->promoted = true;
+                        Compiler().Submit([job] { job->Run(); }, true);
+                    }
+                    ++async_skipped;
+                    return nullptr; // drawn from the frame its pipeline is ready
+                }
+                // A pass that is not drawn every frame needs it now: built here unless a worker
+                // has started it already, then waited for. The wait is compile time.
+                const auto start = std::chrono::steady_clock::now();
+                if (job->state == PendingPipeline::State::Queued) {
+                    lk.unlock();
+                    job->Run();
+                    lk.lock();
+                }
+                job->cv.wait(lk, [&] { return job->state == PendingPipeline::State::Done; });
+                g_bb_compile_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           std::chrono::steady_clock::now() - start)
+                                           .count());
+                ++async_waited;
+            }
+        }
+        pending_graphics.erase(sel.graphics_key);
+        sel.fetch_shader.reset();
+        return FinishPipeline(sel.graphics_key, *job);
+    }
+    if (skippable) {
+        auto job = std::make_shared<PendingPipeline>();
+        job->modules = sel.modules;
+        job->build = [this, key = sel.graphics_key, infos = sel.infos,
+                      runtime_infos = sel.runtime_infos, fetch = sel.fetch_shader,
+                      modules = sel.modules](GraphicsPipeline::SerializationSupport& sdata) mutable {
+            return std::make_unique<GraphicsPipeline>(instance, scheduler, desc_heap, profile, key,
+                                                      *pipeline_cache, infos, runtime_infos, fetch,
+                                                      modules, sdata, false);
+        };
+        pending_graphics.emplace(sel.graphics_key, job);
+        ++async_started;
+        ++g_bb_compiles;
+        Compiler().Submit([job] { job->Run(); }, true);
+        sel.fetch_shader.reset();
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
@@ -456,6 +681,125 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         sel.fetch_shader.reset();
     }
     return it->second.get();
+}
+
+const GraphicsPipeline* PipelineCache::FinishPipeline(const GraphicsPipelineKey& key,
+                                                      PendingPipeline& job) {
+    if (!job.pipeline || !job.pipeline->IsValid()) {
+        // bbport: the driver could not create it. A saved one compiles again at its next use, as
+        // with the warm-up on the GPU thread; a new one gets an empty entry, which keeps the key
+        // from being compiled again on every draw, and is not saved.
+        if (!job.preloaded) {
+            graphics_pipelines[key].reset();
+        }
+        return nullptr;
+    }
+    if (!job.preloaded) {
+        const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(key);
+        RegisterPipelineData(key, pipeline_hash, job.sdata);
+        ++num_new_pipelines;
+    }
+    if (EmulatorSettings.IsShaderCollect()) {
+        for (const vk::ShaderModule module : job.modules) {
+            if (module) {
+                module_related_pipelines[module].emplace_back(key);
+            }
+        }
+    }
+    auto& slot = graphics_pipelines[key];
+    slot = std::move(job.pipeline);
+    return slot.get();
+}
+
+PipelineCompiler& PipelineCache::Compiler() {
+    if (!compiler) {
+        const char* env = std::getenv("BB_ASYNC_PIPELINE_THREADS");
+        const u32 threads = env && *env ? u32(std::strtoul(env, nullptr, 10))
+                                        : std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
+        compiler = std::make_unique<PipelineCompiler>(std::max(threads, 1u));
+        std::printf("GPU: pipelines compile in the background on %u threads "
+                    "(BB_ASYNC_PIPELINES=0: on the GPU thread, the game waits)\n",
+                    std::max(threads, 1u));
+    }
+    return *compiler;
+}
+
+bool PipelineCache::QueueSavedPipeline(GraphicsPipeline::SerializationSupport&& sdata) {
+    if (graphics_pipelines.contains(sel.graphics_key) ||
+        pending_graphics.contains(sel.graphics_key)) {
+        return false; // saved twice
+    }
+    auto job = std::make_shared<PendingPipeline>();
+    job->preloaded = true;
+    job->modules = sel.modules;
+    job->sdata = std::move(sdata);
+    job->build = [this, key = sel.graphics_key, infos = sel.infos,
+                  runtime_infos = sel.runtime_infos, fetch = sel.fetch_shader,
+                  modules = sel.modules](GraphicsPipeline::SerializationSupport& saved) mutable {
+        return std::make_unique<GraphicsPipeline>(instance, scheduler, desc_heap, profile, key,
+                                                  *pipeline_cache, infos, runtime_infos, fetch,
+                                                  modules, saved, true);
+    };
+    pending_graphics.emplace(sel.graphics_key, job);
+    BbStats::warmup_total.fetch_add(1, std::memory_order_relaxed);
+    Compiler().Submit([job] { job->Run(); }, false);
+    return true;
+}
+
+bool PipelineCache::AsyncEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_ASYNC_PIPELINES");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
+}
+
+bool PipelineCache::AsyncSkippable(const PipelineSelection& selection, bool indirect) {
+    // Only a pass drawn every frame may go without a draw for a frame or two (its render target
+    // drawn to in each of the last frames, below). A one-time render compiles at once, as during
+    // loading screens (a frame of fewer than 300 draws before this one). The pipeline must not
+    // depend on the draw's vertex buffers (VK_EXT_vertex_input_dynamic_state). A size rule (the
+    // scene's, the output's) missed most passes: many set a 16384 scissor.
+    if (!AsyncEnabled() || !instance.IsVertexInputDynamicState() || !selection.regs) {
+        return false;
+    }
+    static u64 frame_seen = ~0ull;
+    static u64 draws_at_start = 0, last_frame_draws = 0;
+    static auto last_report = std::chrono::steady_clock::now();
+    const u64 frame = BbStats::gpu_frames.load(std::memory_order_relaxed);
+    const u64 draws = BbStats::draws.load(std::memory_order_relaxed);
+    if (frame != frame_seen) {
+        last_frame_draws = draws - draws_at_start;
+        draws_at_start = draws;
+        frame_seen = frame;
+        const auto now = std::chrono::steady_clock::now();
+        if (async_started != 0 && now - last_report >= std::chrono::seconds(5)) {
+            last_report = now;
+            std::printf("GPU: %llu pipelines compiled in the background, %llu draws went without "
+                        "theirs meanwhile, %llu waited for one\n",
+                        (unsigned long long)async_started, (unsigned long long)async_skipped,
+                        (unsigned long long)async_waited);
+            async_started = async_skipped = async_waited = 0;
+        }
+    }
+    if (last_frame_draws < 300) {
+        return false;
+    }
+    // A full-screen pass (one triangle or quad: lighting, fog, post-processing) waits for its
+    // pipeline: going without one for a frame left whole frames grey. So does an indirect draw
+    // (its size unknown here). What may go without is geometry, which shows a frame later.
+    constexpr u32 FullScreenIndices = 12;
+    if (indirect || selection.regs->num_indices <= FullScreenIndices) {
+        return false;
+    }
+    // A pass drawn every frame: its render target drawn to in each of the last 8 frames (the
+    // scene, the output, shadow maps, half-size and depth-only passes alike). A one-time render
+    // (a face baked for a character, a texture made once) goes to a target new or used now and
+    // then: compiled at once, as before.
+    constexpr u32 PerFrameStreak = 8;
+    const u64 target = DrawTarget(*selection.regs);
+    const auto streak = target_streaks.find(target);
+    return target != 0 && streak != target_streaks.end() && streak->second.frames >= PerFrameStreak;
 }
 
 const ComputePipeline* PipelineCache::GetComputePipeline() {

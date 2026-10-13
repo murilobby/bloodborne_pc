@@ -11,6 +11,7 @@
 
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
+#include "bbport_toggles.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -440,6 +441,33 @@ void FpsCounter() {
     ImGui::End();
 }
 
+/// bbport BB_ASYNC_PIPELINES: the saved pipelines are being compiled in the background (logos,
+/// title screen) after a start.
+bool WarmingUp() {
+    const u32 total = BbStats::warmup_total.load(std::memory_order_relaxed);
+    return total != 0 && BbStats::warmup_done.load(std::memory_order_relaxed) < total;
+}
+
+/// Its progress, bottom left, until it is done.
+void ShaderWarmUp() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - pad),
+                            ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##warmup", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    const u32 total = BbStats::warmup_total.load(std::memory_order_relaxed);
+    const u32 done = std::min(BbStats::warmup_done.load(std::memory_order_relaxed), total);
+    ImGui::Text("Compiling shaders  %u / %u", done, total);
+    ImGui::ProgressBar(total ? float(done) / float(total) : 1.0f, ImVec2(240.0f * base_scale, 0.0f),
+                       "");
+    ImGui::End();
+}
+
 } // namespace
 
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
@@ -608,7 +636,8 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps);
+    return initialized &&
+           (menu_open || text_entry_active || BbSettings::Get().show_fps || WarmingUp());
 }
 
 bool CapturesInput() {
@@ -653,6 +682,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    if (WarmingUp() && !menu_open) {
+        ShaderWarmUp();
     }
     if (text_entry_active) {
         TextEntryBox();

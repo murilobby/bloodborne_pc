@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdio>
+
+#include "bbport_toggles.h"
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -257,6 +261,16 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
     }
 
+    // bbport BB_ASYNC_PIPELINES: created on the compiler's threads while the game starts (logos,
+    // title screen) instead of here, before the first frame.
+    if (AsyncEnabled()) {
+        const bool queued = QueueSavedPipeline(std::move(sdata));
+        sel.infos.fill(nullptr);
+        sel.modules.fill(nullptr);
+        sel.fetch_shader.reset();
+        return queued;
+    }
+
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     ASSERT(is_new);
 
@@ -372,6 +386,11 @@ void PipelineCache::WarmUp() {
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
+    const auto warmup_start = std::chrono::steady_clock::now();
+    BbStats::warmup_start_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       warmup_start.time_since_epoch())
+                                       .count(),
+                                   std::memory_order_relaxed);
 
     Storage::DataBase::Instance().ForEachBlob(
         Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
@@ -405,6 +424,19 @@ void PipelineCache::WarmUp() {
     if (num_total_pipelines > num_pipelines) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines);
+    }
+    // bbport BB_ASYNC_PIPELINES: the graphics pipelines are queued, not created yet.
+    const u32 queued = BbStats::warmup_total.load(std::memory_order_relaxed);
+    if (queued != 0) {
+        std::printf("GPU: %u saved pipelines queued in %.1f s; they compile in the background "
+                    "while the game starts\n",
+                    queued,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - warmup_start)
+                        .count());
+        BbStats::warmup_queued.store(true, std::memory_order_release);
+        if (BbStats::warmup_done.load(std::memory_order_relaxed) == queued) {
+            std::printf("GPU: %u saved pipelines compiled in the background\n", queued);
+        }
     }
 
     Storage::DataBase::Instance().FinishPreload();
